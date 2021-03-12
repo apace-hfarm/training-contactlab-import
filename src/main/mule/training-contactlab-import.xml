@@ -1,0 +1,172 @@
+<?xml version="1.0" encoding="UTF-8"?>
+
+<mule xmlns:http="http://www.mulesoft.org/schema/mule/http" xmlns:vm="http://www.mulesoft.org/schema/mule/vm"
+	xmlns:file="http://www.mulesoft.org/schema/mule/file"
+	xmlns="http://www.mulesoft.org/schema/mule/core" xmlns:doc="http://www.mulesoft.org/schema/mule/documentation" xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance" xsi:schemaLocation="http://www.mulesoft.org/schema/mule/core http://www.mulesoft.org/schema/mule/core/current/mule.xsd
+http://www.mulesoft.org/schema/mule/file http://www.mulesoft.org/schema/mule/file/current/mule-file.xsd
+http://www.mulesoft.org/schema/mule/vm http://www.mulesoft.org/schema/mule/vm/current/mule-vm.xsd
+http://www.mulesoft.org/schema/mule/http http://www.mulesoft.org/schema/mule/http/current/mule-http.xsd">
+  <file:config name="FileConfig" doc:name="File Config" doc:id="b157a232-d048-4e0d-aeed-9e43057d0a99" >
+    <file:connection workingDir="${fs.workingdir}" />
+  </file:config>
+  <configuration-properties doc:name="Configuration properties" doc:id="19c31d68-24ce-4527-a23d-39d7b64dbb0c" file="${env}.properties" />
+  <global-property doc:name="Global Property" doc:id="0d35b12a-bc38-44cc-88ef-ec5505fcc370" name="env" value="dev" />
+  <vm:config name="VMConfig" doc:name="VM Config" doc:id="413d6037-a3ad-4c7c-9758-8f2fa957e66a" >
+    <vm:connection >
+      <reconnection >
+        <reconnect count="5" />
+      </reconnection>
+    </vm:connection>
+    <vm:queues >
+      <vm:queue queueName="${vm.contactlab.queue}" />
+    </vm:queues>
+  </vm:config>
+  <http:request-config name="HTTPSfApiRequestConfig" doc:name="HTTP Request configuration" doc:id="ee5bca3b-71a5-49f2-b96e-7027d054a69a" basePath="${salesforce.api.basepath}">
+    <http:request-connection protocol="HTTPS" host="${salesforce.host}" port="${salesforce.port}" >
+      <reconnection >
+        <reconnect count="5" />
+      </reconnection>
+    </http:request-connection>
+  </http:request-config>
+  <flow name="training-contactlab-parsecsv" doc:id="41ed0173-d13d-4d84-9718-29e476204524" >
+    <file:listener doc:name="On New or Updated File" doc:id="59c46841-8bf1-4264-8a2a-7590a6189775" config-ref="FileConfig" recursive="false" moveToDirectory="${fs.workingdir}${fs.processeddir}" renameTo="#[%dw 2.0
+import * from dw::core::Strings
+output application/java
+var filename = if(!isEmpty(attributes) and !isEmpty(attributes.fileName)) attributes.fileName as String else 'NONAME.csv'
+var suffix2 = now() as String {format: &quot;yyyyMMddHHmmssSSS&quot;}
+var suffix = correlationId
+var name = substringBefore(filename, '.')
+var extension = substringAfter(filename, '.')
+---
+name ++ '_' ++ suffix ++ '.' ++ extension]" outputMimeType='application/csv; quote="\""; ignoreemptyline=true; streaming=true; separator=|' outputEncoding="UTF-8">
+      <repeatable-in-memory-stream />
+      <reconnect count="5" />
+      <scheduling-strategy >
+        <cron expression="${fs.check.cron.expression}" timeZone="${fs.timezone}" />
+      </scheduling-strategy>
+      <file:matcher filenamePattern="regex:.+(\.csv|\.CSV|\.csV|\.cSV|\.CSv|\.Csv|\.cSv|\.CsV)" directories="EXCLUDE" symLinks="EXCLUDE" />
+    </file:listener>
+    <set-payload value="#[%dw 2.0
+output application/java
+---
+payload as Iterator]" doc:name="payload as Iterator" doc:id="1f5d0271-83c9-4f02-b54b-ce77d5e90ad8" />
+    <foreach doc:name="For Each record in CSV file" doc:id="306af97e-2500-4aef-a188-4d433c736b1e" collection="#[payload]">
+      <set-payload value="#[%dw 2.0&#10;output application/json&#10;---&#10;payload]" doc:name="toJSON" doc:id="1a211fc5-e141-4e9f-a10e-f7c1da41ba65" />
+      <choice doc:name="Choice" doc:id="b1589405-b5e4-484b-a07d-2b1791f188e1" >
+        <when expression="#[!isEmpty(payload)]">
+          <vm:publish doc:name="Publish message on the queue" doc:id="6830eead-0b70-444d-9ec5-b2881453d8ee" config-ref="VMConfig" sendCorrelationId="AUTO" queueName="${vm.contactlab.queue}"/>
+        </when>
+      </choice>
+    </foreach>
+<!-- 
+    <set-payload value="#[%dw 2.0
+output application/json
+-&#45;&#45;
+payload map (log('RECORD',$))]" doc:name="log" doc:id="98814cc3-696f-4095-b413-c6ff93e86ec0" />
+ -->
+  </flow>
+  <flow name="training-contactlab-update-salesforce" doc:id="d7a56adb-0070-4dd1-83d6-746df66ab527" >
+    <vm:listener doc:name="Listener on the queue" doc:id="bc397d04-1f31-4ff6-89ac-5566e0c17ad2" config-ref="VMConfig" queueName="${vm.contactlab.queue}">
+      <reconnect count="5" />
+    </vm:listener>
+    <set-variable value="#[%dw 2.0&#10;output application/json&#10;---&#10;payload]" doc:name="csvData" doc:id="afd817b7-14de-47ed-a89e-6bed61dc6ae5" variableName="csvData"/>
+    <try doc:name="Try to get matching PersonAccount" doc:id="94588f9b-156c-4a4e-9abb-1c2d2b3f0bfd" >
+      <flow-ref doc:name="doSalesforceLogin" doc:id="8b7a9c84-06da-488b-ba52-e60a013616e8" name="doSalesforceLogin" />
+      <http:request method="GET" doc:name="GET /services/data/v50.0/query/?q={QUERY}" doc:id="014e057f-a721-4bdb-be3b-fa8482556ab3" config-ref="HTTPSfApiRequestConfig" sendCorrelationId="AUTO" path="${salesforce.rest.api.query}" target="personAccountQueryResult" responseTimeout="#[30000]" targetValue="#[message]">
+      <reconnect />
+      <http:headers><![CDATA[#[{
+	Authorization: "Bearer " ++ vars.accessToken as String
+}]]]></http:headers>
+      <http:query-params><![CDATA[#[output application/java
+---
+{
+  q : Mule::p('salesforce.personaccount.query') replace /\:email/ with(payload.RECIPIENT)
+}]]]></http:query-params>
+    </http:request>
+      <error-handler >
+        <on-error-continue enableNotifications="true" logException="true" doc:name="On Error Continue" doc:id="faab99fb-f3c9-4bcc-a4c9-ffaa6a468a3f">
+          <logger level="ERROR" doc:name="log error" doc:id="874d48fb-e830-4211-a3fc-06276ba5d6d3" message="An error occured trying to execute GET /services/data/v50.0/query/?q=#[Mule::p('salesforce.personaccount.query')]" />
+        </on-error-continue>
+      </error-handler>
+    </try>
+    <choice doc:name="Choice" doc:id="5c9d5a81-24c5-4b0e-81f7-0688fa5fe1bc" >
+      <when expression="#[!isEmpty(vars.personAccountQueryResult) and !isEmpty(vars.personAccountQueryResult.attributes) and (vars.personAccountQueryResult.attributes.statusCode ~= 200) and !isEmpty(vars.personAccountQueryResult.payload) and (vars.personAccountQueryResult.payload.totalSize as Number &gt; 0) and ((vars.csvData.EVENT_CODE default '' as String contains('L')) or (vars.csvData.EVENT_CODE default '' as String contains('K')))]">
+        <set-variable value="#[%dw 2.0&#10;output application/json&#10;---&#10;vars.personAccountQueryResult.payload.records]" doc:name="resultSet" doc:id="49c3d865-c85a-41fb-89fd-6bdb54816d62" variableName="resultSet"/>
+        <set-payload value="#[%dw 2.0&#10;import withMaxSize from dw::core::Strings&#10;output application/json&#10;---&#10;(vars.resultSet filter (($.Data_Consenso_Marketing__pc default '1970-01-01') as Date {format: 'yyyy-MM-dd' as String} &lt; ((vars.csvData.EVENT_DATE withMaxSize 10) as Date {format: 'yyyy-MM-dd' as String}))) filter ($.Marketing__pc ~= true)]" doc:name="payload" doc:id="8acd9c25-72e1-4d03-b3f2-b25a5cfa9267" />
+        <choice doc:name="Choice" doc:id="93872ec7-905f-4aa7-81fd-7bbdaeb09c61" >
+          <when expression="#[!isEmpty(payload)]">
+            <foreach doc:name="for each Salesforce record matching the condition" doc:id="569dbc22-bf17-437d-8787-29708653f0a0" collection="#[payload]">
+              <logger level="INFO" doc:name="UPDATING SALESFORCE RECORD" doc:id="0a0e2e2a-76ff-4c3b-9b76-f36c9c975322" message="UPDATING SALESFORCE RECORD #[payload]" />
+              <set-variable value="#[%dw 2.0&#10;import withMaxSize from dw::core::Strings&#10;output application/json&#10;---&#10;{&#10;	id: payload.Id,&#10;	Marketing__pc: false,&#10;	Data_Consenso_Marketing__pc: vars.csvData.EVENT_DATE withMaxSize 10&#10;}]" doc:name="salesforcePayload" doc:id="29d40cbb-5261-456d-ae09-d5e5f86a628f" variableName="salesforcePayload"/>
+              <logger level="INFO" doc:name="SALESFORCE PAYLOAD" doc:id="4d8dbbd0-d43d-46a4-b00f-2b605dbc4d3e" message="SALESFORCE PAYLOAD: #[vars.salesforcePayload]"/>
+              <try doc:name="Try" doc:id="b922608e-b438-4594-8d5e-08099d6e8159" >
+                <http:request method="PATCH" doc:name="PATCH /services/data/v50.0/sobjects/Account/{accountId}" doc:id="49b2ce29-7f33-4845-a2ca-d1af74567ccc" config-ref="HTTPSfApiRequestConfig" path="${salesforce.rest.api.account}/{accountId}" sendCorrelationId="AUTO">
+                <http:body ><![CDATA[#[%dw 2.0
+output application/json
+---
+vars.salesforcePayload filterObject ((value, key) -> key ~= 'Marketing__pc' or key ~= 'Data_Consenso_Marketing__pc')]]]></http:body>
+                  <http:headers><![CDATA[#[{
+	Authorization: "Bearer " ++ vars.accessToken as String
+}]]]></http:headers>
+                <http:uri-params><![CDATA[#[output application/java
+---
+{
+	accountId : vars.salesforcePayload.id
+}]]]></http:uri-params>
+              </http:request>
+                <error-handler >
+                  <on-error-continue enableNotifications="true" logException="true" doc:name="On Error Continue" doc:id="aad64c4a-2174-4b06-8ec1-0d1e335bea39" type="HTTP:UNAUTHORIZED">
+                    <flow-ref doc:name="doSalesforceLogin" doc:id="44ca0866-c79b-4970-ac29-129dd1daa0de" name="doSalesforceLogin"/>
+                <http:request method="PATCH" doc:name="PATCH /services/data/v50.0/sobjects/Account/{accountId}" doc:id="90c130ab-2698-4826-9ae8-7e36d0819ab2" config-ref="HTTPSfApiRequestConfig" path="${salesforce.rest.api.account}/{accountId}" sendCorrelationId="AUTO">
+                <http:body ><![CDATA[#[%dw 2.0
+output application/json
+---
+vars.salesforcePayload filterObject ((value, key) -> key ~= 'Marketing__pc' or key ~= 'Data_Consenso_Marketing__pc')]]]></http:body>
+                      <http:headers><![CDATA[#[{
+	Authorization: "Bearer " ++ vars.accessToken as String
+}]]]></http:headers>
+                <http:uri-params><![CDATA[#[output application/java
+---
+{
+	accountId : vars.salesforcePayload.id
+}]]]></http:uri-params>
+              </http:request>
+                  </on-error-continue>
+                  <on-error-propagate enableNotifications="true" logException="true" doc:name="On Error Propagate" doc:id="abe12cdc-1949-497e-b89a-bce7b09fd752" >
+                    <logger level="ERROR" doc:name="log error" doc:id="b673619a-3950-47ff-a8e6-0e6a047903c1" message="An error occured trying to update the record #[vars.salesforcePayload]"/>
+                  </on-error-propagate>
+                </error-handler>
+              </try>
+              <logger level="INFO" doc:name="log result" doc:id="1b94cfa8-d92a-403e-8660-874572984fd6" message="payload: #[payload]"/>
+            </foreach>
+          </when>
+          <otherwise >
+            <logger level="INFO" doc:name="DO NOTHING" doc:id="d4162d5d-cd70-44cb-b216-c510cba25c77" message="DO NOTHING"/>
+          </otherwise>
+        </choice>
+      </when>
+      <otherwise >
+        <logger level="INFO" doc:name="NO CONDITIONS TO FURTHER EVALUATION" doc:id="313673da-a93c-49da-8093-088e34c82fec" message="NO CONDITIONS TO FURTHER EVALUATION"/>
+      </otherwise>
+    </choice>
+  </flow>
+  <sub-flow name="doSalesforceLogin" doc:id="f5243252-d57a-4874-af00-c8616857acb3" doc:description="Salesforce REST login to get the accessToken required to use the synchronous API.">
+			<http:request method="POST" doc:name="POST /services/oauth2/token" doc:id="0e6dee96-da75-4a3a-b687-b257eec82dff" target="restLogin" config-ref="HTTPSfApiRequestConfig" path="${salesforce.api.rest.authorization.subpath}" targetValue="#[%dw 2.0
+output application/json
+---
+payload]">
+			<http:query-params><![CDATA[#[%dw 2.0
+output application/json
+---
+{
+	grant_type: Mule::p('salesforce.login.param.granttype'),
+	client_id: Mule::p('salesforce.login.param.clientid'),
+	client_secret: Mule::p('salesforce.login.param.clientsecret'),
+	username: Mule::p('salesforce.login.param.username'),
+	password: Mule::p('salesforce.login.param.password')
+}]]]></http:query-params>
+					</http:request>
+		<set-variable value="#[vars.restLogin.access_token]" doc:name="accessToken" doc:id="92b24196-c003-4658-a7ea-74c7605979b0" variableName="accessToken" />
+		<logger level="INFO" doc:name="Do login in Salesforce to retrieve the token and store it in accessToken var" doc:id="c010fdd3-fce6-467d-8ea1-0657a0df104f" message="Doing login in Salesforce..." />
+	</sub-flow>
+</mule>
